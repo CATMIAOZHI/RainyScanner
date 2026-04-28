@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 顶部横扫粉色雷达背景 -->
+    <path
+        android:fillColor="#33FF6B8E"
+        android:pathData="M 28,30 L 80,30 L 80,60 L 28,60 Z" />
+
+    <!-- 扫描框 左上 (草莓粉色) -->
+    <path
+        android:strokeColor="#FF85A2"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 32,46 L 32,32 L 46,32"/>
+
+    <!-- 扫描框 右上 (草莓粉色) -->
+    <path
+        android:strokeColor="#FF85A2"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 62,32 L 76,32 L 76,46"/>
+
+    <!-- 扫描框 左下 (草莓粉色) -->
+    <path
+        android:strokeColor="#FF85A2"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 32,62 L 32,76 L 46,76"/>
+
+    <!-- 扫描框 右下 (草莓粉色) -->
+    <path
+        android:strokeColor="#FF85A2"
+        android:strokeWidth="5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M 76,62 L 76,76 L 62,76"/>
+
+    <!-- 扫描的核心光束 (纯白光束带点发光感) -->
+    <path
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="4"
+        android:strokeLineCap="round"
+        android:pathData="M 28,60 L 80,60"/>
+
+    <!-- 中间嵌入一颗纯白的小爱心 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M 54,49 C 54,49 52,43 47,43 C 41,43 41,50 41,50 C 41,56 54,64 54,64 C 54,64 67,56 67,50 C 67,50 67,43 61,43 C 55,43 54,49 54,49 Z"/>
+
+</vector>

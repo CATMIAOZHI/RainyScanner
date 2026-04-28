@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 雨晴扫描 · 樱粉主题 -->
+    <style name="Theme.MyApplication" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/sakura_pink</item>
+        <item name="android:navigationBarColor">@color/sakura_surface</item>
+    </style>
+</resources>

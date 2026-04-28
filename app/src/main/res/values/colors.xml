@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 雨晴扫描 · 樱粉配色 -->
+    <color name="sakura_pink">#FFFF85A2</color>
+    <color name="sakura_pink_dark">#FFFF6B8E</color>
+    <color name="sakura_pink_light">#FFFFB3C6</color>
+    <color name="sakura_bg_start">#FFFFF0F5</color>
+    <color name="sakura_bg_end">#FFFFD1DC</color>
+    <color name="sakura_surface">#FFFFF5F7</color>
+    <color name="sakura_on_surface">#FF4A3540</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
