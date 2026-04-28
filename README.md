@@ -3,38 +3,41 @@
 [![Build & Release](https://github.com/CATMIAOZHI/RainyScanner/actions/workflows/release.yml/badge.svg)](https://github.com/CATMIAOZHI/RainyScanner/actions)
 [![Release](https://img.shields.io/github/v/release/CATMIAOZHI/RainyScanner)](https://github.com/CATMIAOZHI/RainyScanner/releases/latest)
 
-基于 **Jetpack Compose + CameraX + ZXing** 的 Android 条码/二维码扫描应用，采用 Material Design 3 樱粉主题。
+## 💡 为什么用雨晴扫描？
 
-## ✨ 特性
+受够了系统相机的扫码体验？扫到链接**自动跳转浏览器**、扫到 WIFI 码静默连网、扫到电话直接拨出——你连看清楚内容的机会都没有。更别提某些 App 还会**拦截扫码结果**塞进自己的推广页。
+
+**雨晴扫描**做一件事：**把控制权还给你**。
+
+- 🔒 **不自动跳转** — 扫到 URL 不会直接打开浏览器，先让你看清链接再决定
+- 📋 **原始内容可见** — 扫描结果完整展示，一键复制，不会被拦截篡改
+- 🧠 **智能识别类型** — 自动标注 URL / WIFI / 电话 / 邮箱 / 地理位置等
+- 📜 **本地历史** — 所有扫码记录保存在本地，随时回顾
+- 🌸 **清爽樱粉 UI** — Material Design 3 主题，舒服不刺眼
+
+## ✨ 技术特性
 
 - **Jetpack Compose** — 现代化声明式 UI
-- **CameraX + ZXing** — 纯软件解码，支持多种条码格式
-- **ML Kit Barcode** — 备选扫描方案（依赖已集成）
-- **扫描历史** — SharedPreferences 本地持久化
-- **Material Design 3** — 元气樱粉配色
+- **CameraX + ZXing** — 纯软件解码，支持 QR / Code128 / EAN / Data Matrix / PDF417 / Aztec
+- **ML Kit Barcode** — 备选扫描引擎（依赖已集成，可切换）
+- **扫描历史** — SharedPreferences 持久化，不上传任何数据
 - **Gradle Version Catalog** — 统一依赖管理
 
 ## 📦 下载
 
-前往 [Releases](https://github.com/CATMIAOZHI/RainyScanner/releases/latest) 下载最新 APK，直接安装即可。
+前往 [Releases](https://github.com/CATMIAOZHI/RainyScanner/releases/latest) 下载 APK 直接安装。
 
 ## 🛠️ 构建
 
-### 环境要求
-
-- JDK 17+
-- Android SDK (compileSdk 35, minSdk 24)
-
-### 命令
+**环境**：JDK 17+、Android SDK (compileSdk 35)
 
 ```bash
 ./gradlew assembleDebug      # Debug APK
-./gradlew assembleRelease    # Release APK（需签名）
+./gradlew assembleRelease    # Release APK（已配置签名）
 ./gradlew installDebug       # 安装到设备
-./gradlew clean              # 清理
 ```
 
-生成的 APK 位于 `app/build/outputs/apk/`。
+APK 输出：`app/build/outputs/apk/`
 
 ## 📁 项目结构
 
@@ -42,7 +45,7 @@
 RainyScanner/
 ├── app/
 │   ├── src/main/java/com/rainyscanner/app/
-│   │   ├── MainActivity.kt              # 主入口 + 双屏导航
+│   │   ├── MainActivity.kt              # 主入口 + 扫描/历史双屏导航
 │   │   ├── data/ScanHistory.kt          # 扫描历史持久化
 │   │   └── ui/
 │   │       ├── screen/
@@ -52,8 +55,6 @@ RainyScanner/
 │   │           ├── Color.kt / Theme.kt / Type.kt
 │   └── build.gradle.kts
 ├── gradle/libs.versions.toml            # 统一依赖版本
-├── build.gradle.kts
-├── settings.gradle.kts
 └── .github/workflows/release.yml        # CI/CD 自动构建发布
 ```
 
@@ -64,21 +65,9 @@ RainyScanner/
 | UI | Jetpack Compose + Material3 |
 | 相机 | CameraX |
 | 解码 | ZXing + ML Kit Barcode |
-| 语言 | Kotlin |
-| 构建 | Gradle 8.x + AGP 8.7 |
+| 语言 | 100% Kotlin |
+| 构建 | Gradle + AGP 8.7 |
 | CI/CD | GitHub Actions |
-
-## 📝 自定义
-
-### 修改包名
-
-1. 修改 `app/build.gradle.kts` 中的 `namespace` 和 `applicationId`
-2. 重命名源码目录 `java/com/rainyscanner/app` 为你的包名结构
-3. 更新 `AndroidManifest.xml` 中的引用
-
-### 修改主题颜色
-
-编辑 `app/.../ui/theme/Color.kt`，替换颜色值即可。
 
 ## 📄 许可
 
