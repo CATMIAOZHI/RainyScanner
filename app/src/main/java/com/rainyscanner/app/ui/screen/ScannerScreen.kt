@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -22,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Refresh
@@ -66,6 +68,43 @@ fun detectBarcodeType(rawValue: String): String {
     }
 }
 
+/**
+ * 从 Bitmap 解码条码/二维码，返回原始文本或 null。
+ */
+fun decodeBitmap(bitmap: android.graphics.Bitmap): String? {
+    val width = bitmap.width
+    val height = bitmap.height
+    val pixels = IntArray(width * height)
+    bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+    val source = com.google.zxing.RGBLuminanceSource(width, height, pixels)
+    val binarizer = HybridBinarizer(source)
+    val binaryBitmap = BinaryBitmap(binarizer)
+
+    val reader = MultiFormatReader().apply {
+        val hints = mapOf(
+            DecodeHintType.POSSIBLE_FORMATS to listOf(
+                BarcodeFormat.QR_CODE,
+                BarcodeFormat.CODE_128,
+                BarcodeFormat.CODE_39,
+                BarcodeFormat.EAN_13,
+                BarcodeFormat.EAN_8,
+                BarcodeFormat.DATA_MATRIX,
+                BarcodeFormat.PDF_417,
+                BarcodeFormat.AZTEC
+            ),
+            DecodeHintType.TRY_HARDER to true
+        )
+        setHints(hints)
+    }
+
+    return try {
+        reader.decode(binaryBitmap).text
+    } catch (e: NotFoundException) {
+        null
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScannerScreen(
@@ -87,6 +126,46 @@ fun ScannerScreen(
         hasPermission = granted
         if (!granted) {
             Toast.makeText(context, "喵~ 需要相机权限才能扫码哦！", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // 相册选图解码喵~
+    var isDecodingImage by remember { mutableStateOf(false) }
+    val galleryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let {
+            isDecodingImage = true
+            val executor = Executors.newSingleThreadExecutor()
+            executor.execute {
+                try {
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                    val bitmap = BitmapFactory.decodeStream(inputStream)
+                    inputStream?.close()
+                    if (bitmap != null) {
+                        val result = decodeBitmap(bitmap)
+                        bitmap.recycle()
+                        if (result != null) {
+                            val record = ScanRecord(rawContent = result, type = detectBarcodeType(result))
+                            scannedResult = record
+                            scanHistory.add(record)
+                            isScanning = false
+                        } else {
+                            // 在主线程弹提示
+                            (context as? android.app.Activity)?.runOnUiThread {
+                                Toast.makeText(context, "喵~ 图片中没有识别到条码", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    (context as? android.app.Activity)?.runOnUiThread {
+                        Toast.makeText(context, "喵~ 读取图片失败", Toast.LENGTH_SHORT).show()
+                    }
+                } finally {
+                    isDecodingImage = false
+                    executor.shutdown()
+                }
+            }
         }
     }
 
@@ -122,6 +201,14 @@ fun ScannerScreen(
                 IconButton(onClick = onNavigateToAbout) {
                     Icon(Icons.Default.Info, contentDescription = "关于",
                         tint = MaterialTheme.colorScheme.primary)
+                }
+                IconButton(
+                    onClick = { galleryLauncher.launch("image/*") },
+                    enabled = !isDecodingImage
+                ) {
+                    Icon(Icons.Default.Image, contentDescription = "相册扫码",
+                        tint = if (isDecodingImage) MaterialTheme.colorScheme.onSurfaceVariant
+                               else MaterialTheme.colorScheme.primary)
                 }
                 if (scannedResult != null) {
                     IconButton(onClick = {
