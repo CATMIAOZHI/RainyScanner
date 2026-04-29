@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import com.rainyscanner.app.data.ScanHistory
 import com.rainyscanner.app.ui.screen.HistoryScreen
 import com.rainyscanner.app.ui.screen.ScannerScreen
+import com.rainyscanner.app.ui.screen.AboutScreen
 import com.rainyscanner.app.ui.theme.RainyScannerTheme
 
 class MainActivity : ComponentActivity() {
@@ -34,12 +35,18 @@ fun App(scanHistory: ScanHistory) {
         Screen.Scanner -> {
             ScannerScreen(
                 scanHistory = scanHistory,
-                onNavigateToHistory = { currentScreen = Screen.History }
+                onNavigateToHistory = { currentScreen = Screen.History },
+                onNavigateToAbout = { currentScreen = Screen.About }
             )
         }
         Screen.History -> {
             HistoryScreen(
                 scanHistory = scanHistory,
+                onNavigateBack = { currentScreen = Screen.Scanner }
+            )
+        }
+        Screen.About -> {
+            AboutScreen(
                 onNavigateBack = { currentScreen = Screen.Scanner }
             )
         }
@@ -49,4 +56,5 @@ fun App(scanHistory: ScanHistory) {
 private sealed class Screen {
     data object Scanner : Screen()
     data object History : Screen()
+    data object About : Screen()
 }

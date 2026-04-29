@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.OpenInBrowser
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
@@ -69,7 +70,8 @@ fun detectBarcodeType(rawValue: String): String {
 @Composable
 fun ScannerScreen(
     scanHistory: ScanHistory,
-    onNavigateToHistory: () -> Unit
+    onNavigateToHistory: () -> Unit,
+    onNavigateToAbout: () -> Unit = {}
 ) {
     val context = LocalContext.current
     var scannedResult by remember { mutableStateOf<ScanRecord?>(null) }
@@ -117,6 +119,10 @@ fun ScannerScreen(
                 )
             },
             actions = {
+                IconButton(onClick = onNavigateToAbout) {
+                    Icon(Icons.Default.Info, contentDescription = "关于",
+                        tint = MaterialTheme.colorScheme.primary)
+                }
                 if (scannedResult != null) {
                     IconButton(onClick = {
                         scannedResult = null
