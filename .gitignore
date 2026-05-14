@@ -18,3 +18,8 @@ local.properties
 .kotlin/
 .backup/
 .operit/
+
+# 签名密钥文件 - 绝对不要提交
+*.jks
+*.keystore
+release.jks

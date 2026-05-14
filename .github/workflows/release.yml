@@ -1,11 +1,8 @@
-name: Build & Release APK
+name: Release
 
 on:
   push:
-    branches: [main]
-    tags:
-      - 'v*'
-  workflow_dispatch:
+    tags: ['v*']
 
 permissions:
   contents: write
@@ -14,50 +11,39 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@v3
         with:
           packages: 'platforms;android-35 build-tools;35.0.0'
 
-      - name: Grant gradlew permission
-        run: chmod +x gradlew
+      - name: Decode Keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.jks
 
-      - name: Build Release APK
-        run: ./gradlew assembleRelease
+      - name: Set Signing Credentials
+        run: |
+          echo "RELEASE_STORE_PASSWORD=${{ secrets.KEYSTORE_PASSWORD }}" >> $GITHUB_ENV
+          echo "RELEASE_KEY_ALIAS=${{ secrets.KEY_ALIAS }}" >> $GITHUB_ENV
+          echo "RELEASE_KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}" >> $GITHUB_ENV
 
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: RainyScanner-release
-          path: app/build/outputs/apk/release/app-release.apk
+      - run: chmod +x gradlew
 
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    permissions:
-      contents: write
-    steps:
-      - name: Download APK artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: RainyScanner-release
+      - run: ./gradlew assembleRelease
 
-      - name: Create GitHub Release
+      - name: Rename APK
+        run: cp app/build/outputs/apk/release/app-release.apk "RainyScanner-${GITHUB_REF#refs/tags/}.apk"
+
+      - name: Create Release & Upload
         uses: softprops/action-gh-release@v2
         with:
-          name: "RainyScanner v1.0"
+          name: "🌧️ RainyScanner ${{ github.ref_name }}"
           body: |
-            ## 🌧️ RainyScanner - 雨晴扫描
+            ## 🌧️ RainyScanner ${{ github.ref_name }}
 
             基于 Jetpack Compose 的 Android 条码/二维码扫描应用。
 
@@ -69,8 +55,6 @@ jobs:
 
             ### 📱 安装
             下载 APK 文件直接安装。
-          files: app-release.apk
-          draft: false
-          prerelease: false
+          files: RainyScanner-${{ github.ref_name }}.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
