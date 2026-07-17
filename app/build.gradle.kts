@@ -12,6 +12,7 @@ val localPropertiesFile = rootProject.file("local.properties")
 if (localPropertiesFile.exists()) {
     localProperties.load(localPropertiesFile.inputStream())
 }
+
 fun signingProp(name: String): String {
     return localProperties.getProperty(name)
         ?: System.getenv(name) ?: ""
