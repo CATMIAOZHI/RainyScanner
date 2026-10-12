@@ -6,16 +6,36 @@ import com.google.gson.reflect.TypeToken
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
+/** FIDO / passkey 混合登录链接的前缀（二维码里一般是大写的 `FIDO:/`） */
+const val FIDO_SCHEME_PREFIX = "FIDO:/"
+
+/** 判断扫码内容是不是 FIDO / passkey 链接（大小写都不挑，容忍前导空白喵~） */
+fun isFidoLink(raw: String): Boolean =
+    raw.trimStart().startsWith(FIDO_SCHEME_PREFIX, ignoreCase = true)
+
 data class ScanRecord(
     val id: Long = System.currentTimeMillis(),
     val rawContent: String,
-    val type: String,         // "URL", "TEXT", "WIFI", "CONTACT", etc.
+    val type: String,         // "URL", "TEXT", "WIFI", "CONTACT", "FIDO", etc.
     val timestamp: String = LocalDateTime.now()
         .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
 ) {
-    val isUrl: Boolean get() = type == "URL" && (rawContent.startsWith("http://") || rawContent.startsWith("https://"))
+    /** 普通网页链接（前导空白不影响判定，交给系统时会去掉首尾空白） */
+    val isUrl: Boolean get() {
+        if (type != "URL") return false
+        val value = rawContent.trimStart()
+        return value.startsWith("http://") || value.startsWith("https://")
+    }
+
+    /** FIDO / 通行密钥（passkey）登录请求，例如 `FIDO:/xxxx` */
+    val isFido: Boolean get() = isFidoLink(rawContent)
+
+    /** 能不能交给系统打开（普通 URL 或 FIDO 登录链接） */
+    val isOpenable: Boolean get() = isUrl || isFido
+
     val displayTitle: String get() = when {
         isUrl -> "🔗 ${rawContent.take(50)}${if (rawContent.length > 50) "…" else ""}"
+        isFido -> "🔐 通行密钥（Passkey）登录"
         type == "WIFI" -> "📶 Wi-Fi 网络"
         type == "CONTACT" -> "👤 联系人信息"
         type == "EMAIL" -> "📧 邮件地址"

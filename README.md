@@ -14,6 +14,7 @@
 - 🚫 **不拦截任何链接** — 微信、抖音、淘宝…所有链接一视同仁，扫出来原样展示
 - 🧠 **智能识别类型** — 自动标注 URL / WIFI / 电话 / 邮箱等，你自己决定要不要打开
 - 📋 **原始内容可见** — 先看清再操作，一键复制，不会被篡改或屏蔽
+- 🔐 **通行密钥（Passkey / FIDO）直接放行** — 扫到 `FIDO:/…` 登录二维码，一键交给系统（Google Play 服务的 passkey 提供方）走官方混合登录流程；本 App 不解析、不代理，凭据始终留在系统里
 - 📜 **本地历史** — 所有记录保存在本机，随时回顾
 - 🌸 **清爽樱粉 UI** — Material Design 3 主题，干净不打扰
 
@@ -23,6 +24,7 @@
 - **CameraX + ZXing** — 纯软件解码，支持 QR / Code128 / EAN / Data Matrix / PDF417 / Aztec
 - **ML Kit Barcode** — 备选扫描引擎（依赖已集成，可切换）
 - **扫描历史** — SharedPreferences 持久化，不上传任何数据
+- **FIDO / Passkey** — 识别 `FIDO:/` 混合登录链接并交给系统 passkey 提供方（Google Play 服务）处理
 - **Gradle Version Catalog** — 统一依赖管理
 
 ## 📦 下载
@@ -49,6 +51,7 @@ RainyScanner/
 │   ├── src/main/java/com/rainyscanner/app/
 │   │   ├── MainActivity.kt              # 主入口 + 扫描/历史双屏导航
 │   │   ├── data/ScanHistory.kt          # 扫描历史持久化
+│   │   ├── util/SystemOpener.kt         # 交给系统打开（URL / FIDO passkey）
 │   │   └── ui/
 │   │       ├── screen/
 │   │       │   ├── ScannerScreen.kt     # CameraX + ZXing 实时扫描

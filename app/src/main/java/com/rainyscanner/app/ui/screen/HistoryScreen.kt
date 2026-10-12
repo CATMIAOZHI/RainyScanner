@@ -20,18 +20,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.material.icons.filled.Fingerprint
 import com.rainyscanner.app.data.ScanHistory
 import com.rainyscanner.app.data.ScanRecord
+import com.rainyscanner.app.util.SystemOpener
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -43,6 +42,16 @@ fun HistoryScreen(
     var records by remember { mutableStateOf(scanHistory.getAll()) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     var selectedRecord by remember { mutableStateOf<ScanRecord?>(null) }
+
+    /** 交给系统打开（普通 URL / FIDO 通行密钥）喵~ */
+    fun openWithSystem(record: ScanRecord) {
+        SystemOpener.open(
+            context = context,
+            raw = record.rawContent,
+            failureHint = if (record.isFido) SystemOpener.FIDO_FAILURE_HINT
+                           else SystemOpener.GENERIC_FAILURE_HINT
+        )
+    }
 
     // 处理系统返回键喵~
     BackHandler(onBack = onNavigateBack)
@@ -127,12 +136,7 @@ fun HistoryScreen(
                             clipboard.setPrimaryClip(ClipData.newPlainText("history_item", record.rawContent))
                             Toast.makeText(context, "已复制喵~ ✨", Toast.LENGTH_SHORT).show()
                         },
-                        onOpen = {
-                            if (record.isUrl) {
-                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse(record.rawContent))
-                                context.startActivity(intent)
-                            }
-                        },
+                        onOpen = { openWithSystem(record) },
                         onDelete = {
                             scanHistory.remove(record.id)
                             records = scanHistory.getAll()
@@ -197,11 +201,7 @@ fun HistoryScreen(
                 clipboard.setPrimaryClip(ClipData.newPlainText("history_detail", record.rawContent))
                 Toast.makeText(context, "已复制喵~ ✨", Toast.LENGTH_SHORT).show()
             },
-            onOpen = {
-                if (record.isUrl) {
-                    context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(record.rawContent)))
-                }
-            },
+            onOpen = { openWithSystem(record) },
             onDelete = {
                 scanHistory.remove(record.id)
                 records = scanHistory.getAll()
@@ -281,11 +281,12 @@ fun HistoryItem(
                         modifier = Modifier.size(20.dp)
                     )
                 }
-                if (record.isUrl) {
+                if (record.isOpenable) {
                     IconButton(onClick = onOpen) {
                         Icon(
-                            Icons.Default.OpenInBrowser,
-                            contentDescription = "打开",
+                            imageVector = if (record.isFido) Icons.Default.Fingerprint
+                                          else Icons.Default.OpenInBrowser,
+                            contentDescription = if (record.isFido) "用系统打开通行密钥" else "打开",
                             tint = MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(20.dp)
                         )
@@ -361,6 +362,14 @@ fun RecordDetailDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                if (record.isFido) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "通行密钥由系统（Google Play 服务）处理，雨晴不碰你的凭据喵~",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         },
         confirmButton = {
@@ -381,13 +390,17 @@ fun RecordDetailDialog(
                     Spacer(modifier = Modifier.width(4.dp))
                     Text("复制")
                 }
-                if (record.isUrl) {
+                if (record.isOpenable) {
                     Button(onClick = onOpen,
                         shape = RoundedCornerShape(20.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary)) {
-                        Icon(Icons.Default.OpenInBrowser, contentDescription = null,
-                            modifier = Modifier.size(18.dp))
+                        Icon(
+                            imageVector = if (record.isFido) Icons.Default.Fingerprint
+                                          else Icons.Default.OpenInBrowser,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text("打开")
                     }

@@ -4,7 +4,6 @@ import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
-import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
@@ -22,6 +21,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
@@ -52,18 +52,25 @@ import com.google.zxing.*
 import com.google.zxing.common.HybridBinarizer
 import com.rainyscanner.app.data.ScanHistory
 import com.rainyscanner.app.data.ScanRecord
+import com.rainyscanner.app.data.isFidoLink
+import com.rainyscanner.app.util.SystemOpener
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
 
+/**
+ * 识别扫码内容的类型；二维码偶尔带的前导空白不影响判定喵~
+ */
 fun detectBarcodeType(rawValue: String): String {
+    val value = rawValue.trimStart()
     return when {
-        rawValue.startsWith("http://") || rawValue.startsWith("https://") -> "URL"
-        rawValue.startsWith("WIFI:") -> "WIFI"
-        rawValue.startsWith("BEGIN:VCARD") || rawValue.startsWith("MECARD:") -> "CONTACT"
-        rawValue.startsWith("MATMSG:") -> "EMAIL"
-        rawValue.startsWith("tel:") -> "PHONE"
-        rawValue.startsWith("smsto:") -> "SMS"
-        rawValue.startsWith("geo:") -> "GEO"
+        isFidoLink(value) -> "FIDO"
+        value.startsWith("http://") || value.startsWith("https://") -> "URL"
+        value.startsWith("WIFI:") -> "WIFI"
+        value.startsWith("BEGIN:VCARD") || value.startsWith("MECARD:") -> "CONTACT"
+        value.startsWith("MATMSG:") -> "EMAIL"
+        value.startsWith("tel:") -> "PHONE"
+        value.startsWith("smsto:") -> "SMS"
+        value.startsWith("geo:") -> "GEO"
         else -> "TEXT"
     }
 }
@@ -264,10 +271,13 @@ fun ScannerScreen(
                             clipboard.setPrimaryClip(ClipData.newPlainText("scan_result", result.rawContent))
                             Toast.makeText(context, "已复制喵~ ✨", Toast.LENGTH_SHORT).show()
                         },
-                        onOpenBrowser = {
-                            if (result.isUrl) {
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(result.rawContent)))
-                            }
+                        onOpen = {
+                            SystemOpener.open(
+                                context = context,
+                                raw = result.rawContent,
+                                failureHint = if (result.isFido) SystemOpener.FIDO_FAILURE_HINT
+                                               else SystemOpener.GENERIC_FAILURE_HINT
+                            )
                         },
                         onScanAgain = { scannedResult = null; isScanning = true },
                         modifier = Modifier.fillMaxWidth().padding(24.dp)
@@ -511,7 +521,7 @@ fun ScanOverlay(modifier: Modifier) {
 fun ResultCard(
     record: ScanRecord,
     onCopy: () -> Unit,
-    onOpenBrowser: () -> Unit,
+    onOpen: () -> Unit,
     onScanAgain: () -> Unit,
     modifier: Modifier
 ) {
@@ -532,6 +542,13 @@ fun ResultCard(
             Spacer(modifier = Modifier.height(4.dp))
             Text(text = record.type, style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (record.isFido) {
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(text = "通行密钥由系统（Google Play 服务）处理，雨晴不碰你的凭据喵~",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center)
+            }
             Spacer(modifier = Modifier.height(20.dp))
             Surface(
                 modifier = Modifier.fillMaxWidth(),
@@ -557,13 +574,17 @@ fun ResultCard(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text("复制")
                 }
-                if (record.isUrl) {
-                    Button(onClick = onOpenBrowser, modifier = Modifier.weight(1f),
+                if (record.isOpenable) {
+                    Button(onClick = onOpen, modifier = Modifier.weight(1f),
                         shape = RoundedCornerShape(24.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary)) {
-                        Icon(Icons.Default.OpenInBrowser, contentDescription = null,
-                            modifier = Modifier.size(18.dp))
+                        Icon(
+                            imageVector = if (record.isFido) Icons.Default.Fingerprint
+                                          else Icons.Default.OpenInBrowser,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("打开")
                     }
