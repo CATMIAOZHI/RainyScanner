@@ -68,6 +68,8 @@ android {
     }
     buildFeatures {
         compose = true
+        // 让「关于」页能读到 versionName，避免版本号在界面里写死
+        buildConfig = true
     }
     packaging {
         resources {
