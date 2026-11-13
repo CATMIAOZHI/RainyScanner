@@ -40,6 +40,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -54,12 +55,22 @@ import com.rainyscanner.app.data.ScanHistory
 import com.rainyscanner.app.data.ScanRecord
 import com.rainyscanner.app.data.isFidoLink
 import com.rainyscanner.app.util.SystemOpener
+import android.graphics.RectF
+import android.util.Log
 import android.view.MotionEvent
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageProxy
-import java.nio.ByteBuffer
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
+import androidx.core.view.doOnLayout
+import androidx.lifecycle.LifecycleOwner
+import java.util.concurrent.CancellationException
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * 识别扫码内容的类型；二维码偶尔带的前导空白不影响判定喵~
@@ -240,10 +251,32 @@ fun ScannerScreen(
             )
         )
 
-        Box(
+        // 框的位置按预览的真实像素算，横竖屏切换时自动重算喵
+        val scanBoxRef = remember { AtomicReference<RectF?>(null) }
+
+        BoxWithConstraints(
             modifier = Modifier.fillMaxSize().weight(1f),
             contentAlignment = Alignment.Center
         ) {
+            val containerWidthPx = constraints.maxWidth.toFloat()
+            val containerHeightPx = constraints.maxHeight.toFloat()
+            val scanSidePx =
+                if (containerWidthPx > 0f && containerHeightPx > 0f) {
+                    minOf(containerWidthPx, containerHeightPx) * SCAN_BOX_RATIO
+                } else 0f
+
+            // 把框换算成「占预览宽高的百分比」，分析帧按同样比例取 ROI，两边天然对齐喵
+            SideEffect {
+                scanBoxRef.set(
+                    if (scanSidePx > 0f) RectF(
+                        (containerWidthPx - scanSidePx) / 2f / containerWidthPx,
+                        (containerHeightPx - scanSidePx) / 2f / containerHeightPx,
+                        (containerWidthPx + scanSidePx) / 2f / containerWidthPx,
+                        (containerHeightPx + scanSidePx) / 2f / containerHeightPx
+                    ) else null
+                )
+            }
+
             if (!hasPermission) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier.padding(32.dp)) {
@@ -263,9 +296,13 @@ fun ScannerScreen(
             } else if (isScanning) {
                 ZxingCameraPreview(
                     modifier = Modifier.fillMaxSize(),
+                    scanBoxRef = scanBoxRef,
                     onBarcodeDetected = { onBarcodeDetected(it) }
                 )
-                ScanOverlay(modifier = Modifier.align(Alignment.Center))
+                ScanOverlay(
+                    modifier = Modifier.align(Alignment.Center),
+                    scanSidePx = scanSidePx
+                )
             } else {
                 scannedResult?.let { result ->
                     ResultCard(
@@ -296,14 +333,49 @@ fun ScannerScreen(
 @Composable
 fun ZxingCameraPreview(
     modifier: Modifier,
+    scanBoxRef: AtomicReference<RectF?>,
     onBarcodeDetected: (String) -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val mainExecutor = remember(context) { ContextCompat.getMainExecutor(context) }
 
     // 持有 cameraProvider 引用，以便在离开页面时 unbind 相机喵！
     val cameraProviderRef = remember { mutableStateOf<ProcessCameraProvider?>(null) }
+
+    // 支持的码制固定，读一遍就够了喵
+    val reader = remember {
+        MultiFormatReader().apply {
+            val hints = mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(
+                    BarcodeFormat.QR_CODE,
+                    BarcodeFormat.CODE_128,
+                    BarcodeFormat.CODE_39,
+                    BarcodeFormat.EAN_13,
+                    BarcodeFormat.EAN_8,
+                    BarcodeFormat.DATA_MATRIX,
+                    BarcodeFormat.PDF_417,
+                    BarcodeFormat.AZTEC
+                ),
+                DecodeHintType.TRY_HARDER to true
+            )
+            setHints(hints)
+        }
+    }
+
+    // 分辨率交给 ResolutionSelector 说清楚（16:9、1280x720），ViewPort 只管视野裁剪，两边不打架喵
+    val resolutionSelector = remember {
+        ResolutionSelector.Builder()
+            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+            .setResolutionStrategy(
+                ResolutionStrategy(
+                    android.util.Size(1280, 720),
+                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                )
+            )
+            .build()
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -317,116 +389,155 @@ fun ZxingCameraPreview(
         modifier = modifier,
         factory = { ctx ->
             PreviewView(ctx).also { previewView ->
+                // 预览撑满预览区，ViewPort 拿到的就是屏幕上真正看得见的视野喵
+                previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
+
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
                     try {
                         val cameraProvider = cameraProviderFuture.get()
                         cameraProviderRef.value = cameraProvider
 
-                        // 安全起见先解绑，避免重复绑定冲突喵！
-                        cameraProvider.unbindAll()
-
-                        val preview = Preview.Builder().build().also {
-                            it.surfaceProvider = previewView.surfaceProvider
-                        }
-
-                        val reader = MultiFormatReader().apply {
-                            val hints = mapOf(
-                                DecodeHintType.POSSIBLE_FORMATS to listOf(
-                                    BarcodeFormat.QR_CODE,
-                                    BarcodeFormat.CODE_128,
-                                    BarcodeFormat.CODE_39,
-                                    BarcodeFormat.EAN_13,
-                                    BarcodeFormat.EAN_8,
-                                    BarcodeFormat.DATA_MATRIX,
-                                    BarcodeFormat.PDF_417,
-                                    BarcodeFormat.AZTEC
-                                ),
-                                DecodeHintType.TRY_HARDER to true
-                            )
-                            setHints(hints)
-                        }
-
-                        val imageAnalysis = ImageAnalysis.Builder()
-                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                            // 不指定分辨率的话，很多机器只给 640x480，码一密就糊喵
-                            .setTargetResolution(android.util.Size(1280, 720))
-                            .build()
-                            .also { analysis ->
-                                analysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                                    try {
-                                        // 先按真实行宽摊平、再取中心区域，避开 rowStride 把画面撕歪
-                                        val frame = imageProxy.centerLuminance()
-                                        if (frame != null) {
-                                            val source = com.google.zxing.PlanarYUVLuminanceSource(
-                                                frame.data,
-                                                frame.width,
-                                                frame.height,
-                                                0, 0,
-                                                frame.width,
-                                                frame.height,
-                                                false
-                                            )
-                                            try {
-                                                val result = reader.decode(
-                                                    BinaryBitmap(HybridBinarizer(source))
-                                                )
-                                                result?.text?.let { text -> onBarcodeDetected(text) }
-                                            } catch (e: NotFoundException) {
-                                                // 这一帧没读出码，很正常喵
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        // 单帧出错不影响下一帧
-                                    } finally {
-                                        imageProxy.close()
-                                    }
-                                }
+                        // viewPort 要等预览量好尺寸才有值；转屏后会重新量、重新绑喵
+                        previewView.doOnLayout {
+                            try {
+                                bindScanUseCases(
+                                    cameraProvider = cameraProvider,
+                                    lifecycleOwner = lifecycleOwner,
+                                    previewView = previewView,
+                                    cameraExecutor = cameraExecutor,
+                                    reader = reader,
+                                    resolutionSelector = resolutionSelector,
+                                    scanBoxRef = scanBoxRef,
+                                    onBarcodeDetected = onBarcodeDetected,
+                                    mainExecutor = mainExecutor
+                                )
+                            } catch (e: Exception) {
+                                Log.e(TAG, "相机绑定失败喵", e)
                             }
-
-                        val camera = cameraProvider.bindToLifecycle(
-                            lifecycleOwner,
-                            CameraSelector.DEFAULT_BACK_CAMERA,
-                            preview,
-                            imageAnalysis
-                        )
-
-                        // 点哪儿对哪儿焦，凑近扫小码很管用喵
-                        previewView.setOnTouchListener { view, event ->
-                            if (event.actionMasked == MotionEvent.ACTION_UP) {
-                                try {
-                                    val point = previewView.meteringPointFactory
-                                        .createPoint(event.x, event.y)
-                                    val focus = FocusMeteringAction.Builder(
-                                        point,
-                                        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
-                                    ).setAutoCancelDuration(5, TimeUnit.SECONDS).build()
-                                    camera.cameraControl.startFocusAndMetering(focus)
-                                } catch (e: Exception) {
-                                    // 个别设备不支持对焦，忽略即可
-                                }
-                                view.performClick()
-                            }
-                            true
                         }
                     } catch (e: Exception) {
-                        e.printStackTrace()
+                        Log.e(TAG, "拿不到相机喵", e)
                     }
-                }, ContextCompat.getMainExecutor(ctx))
+                }, mainExecutor)
             }
         }
     )
 }
 
+/**
+ * 把预览和分析绑到同一个 ViewPort：屏幕上看得见的那块，就是分析帧的解码区域喵。
+ */
+private fun bindScanUseCases(
+    cameraProvider: ProcessCameraProvider,
+    lifecycleOwner: LifecycleOwner,
+    previewView: PreviewView,
+    cameraExecutor: Executor,
+    reader: MultiFormatReader,
+    resolutionSelector: ResolutionSelector,
+    scanBoxRef: AtomicReference<RectF?>,
+    onBarcodeDetected: (String) -> Unit,
+    mainExecutor: Executor
+) {
+    // 安全起见先解绑，避免重复绑定冲突喵！
+    cameraProvider.unbindAll()
+
+    val preview = Preview.Builder().build().also {
+        it.surfaceProvider = previewView.surfaceProvider
+    }
+
+    val imageAnalysis = ImageAnalysis.Builder()
+        .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+        .setResolutionSelector(resolutionSelector)
+        .build()
+        .also { analysis ->
+            analysis.setAnalyzer(cameraExecutor) { imageProxy ->
+                try {
+                    // 按屏幕框住的百分比取亮度，框里对准的就是真正解码的那块喵
+                    val frame = imageProxy.scanBoxLuminance(scanBoxRef.get())
+                    if (frame != null) {
+                        val source = com.google.zxing.PlanarYUVLuminanceSource(
+                            frame.data,
+                            frame.width,
+                            frame.height,
+                            0, 0,
+                            frame.width,
+                            frame.height,
+                            false
+                        )
+                        try {
+                            val result = reader.decode(
+                                BinaryBitmap(HybridBinarizer(source))
+                            )
+                            result?.text?.let { text -> onBarcodeDetected(text) }
+                        } catch (e: NotFoundException) {
+                            // 这一帧没读出码，很正常喵
+                        }
+                    }
+                } catch (e: Exception) {
+                    // 单帧出错不影响下一帧
+                } finally {
+                    imageProxy.close()
+                }
+            }
+        }
+
+    val useCaseGroup = UseCaseGroup.Builder()
+        .addUseCase(preview)
+        .addUseCase(imageAnalysis)
+        .setViewPort(requireNotNull(previewView.viewPort) { "预览还没量好尺寸喵" })
+        .build()
+
+    val camera = cameraProvider.bindToLifecycle(
+        lifecycleOwner,
+        CameraSelector.DEFAULT_BACK_CAMERA,
+        useCaseGroup
+    )
+
+    // 点哪儿对哪儿焦，凑近扫小码很管用喵
+    previewView.setOnTouchListener { view, event ->
+        if (event.actionMasked == MotionEvent.ACTION_UP) {
+            try {
+                val point = previewView.meteringPointFactory
+                    .createPoint(event.x, event.y)
+                val focus = FocusMeteringAction.Builder(
+                    point,
+                    FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                ).setAutoCancelDuration(5, TimeUnit.SECONDS).build()
+                val focusFuture = camera.cameraControl.startFocusAndMetering(focus)
+                // 被下一次对焦顶掉算正常取消，真失败才记一条日志喵
+                focusFuture.addListener({
+                    try {
+                        focusFuture.get()
+                    } catch (e: CancellationException) {
+                        // 新的对焦请求接管了，静默喵
+                    } catch (e: Exception) {
+                        Log.w(TAG, "对焦/测光请求失败喵", e)
+                    }
+                }, mainExecutor)
+            } catch (e: Exception) {
+                // 个别设备不支持对焦，忽略即可
+                Log.w(TAG, "这台设备不支持点按对焦喵", e)
+            }
+            view.performClick()
+        }
+        true
+    }
+}
+
 @Composable
-fun ScanOverlay(modifier: Modifier) {
+fun ScanOverlay(modifier: Modifier, scanSidePx: Float) {
     val primaryColor = MaterialTheme.colorScheme.primary
+    // 框的尺寸由预览尺寸算出来，和 ROI 一个比例喵
+    val scanSideDp = with(LocalDensity.current) {
+        if (scanSidePx > 0f) scanSidePx.toDp() else 240.dp
+    }
 
     // 扫描动画引擎喵！✨
     val infiniteTransition = rememberInfiniteTransition(label = "scan_wave")
     val scanLineOffsetY by infiniteTransition.animateFloat(
         initialValue = 0f,
-        targetValue = 240f, // 和扫描框本身高度一致
+        targetValue = 240f, // 归一化高度，下面按框的实际高度换算喵
         animationSpec = infiniteRepeatable(
             animation = tween(1500, easing = LinearEasing),
             repeatMode = RepeatMode.Reverse
@@ -438,10 +549,10 @@ fun ScanOverlay(modifier: Modifier) {
         modifier = modifier.fillMaxSize(),
         contentAlignment = Alignment.Center
     ) {
-        // 中间主扫描框（带有科幻感的暗场遮罩）喵！
+        // 中间主扫描框（尺寸跟预览走，带一点科幻感的暗场遮罩）喵！
         Box(
             modifier = Modifier
-                .size(240.dp)
+                .size(scanSideDp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.05f))
         ) {
@@ -621,39 +732,119 @@ fun ResultCard(
 
 private data class LumaFrame(val data: ByteArray, val width: Int, val height: Int)
 
-/**
- * 把 YUV_420_888 的 Y 平面按真实行宽摊平，然后取画面中心的正方形。
- * 直接把 planes[0].buffer 当紧凑数组用会踩 rowStride 的对齐填充，整帧会斜着错位喵。
- */
-private fun ImageProxy.centerLuminance(cropRatio: Float = 0.62f): LumaFrame? {
-    val plane = planes.firstOrNull() ?: return null
-    val srcWidth = width
-    val srcHeight = height
-    if (srcWidth <= 0 || srcHeight <= 0) return null
+/** 相机分析器日志标签喵 */
+private const val TAG = "RainyScanner"
 
-    val side = (minOf(srcWidth, srcHeight) * cropRatio).toInt().coerceAtLeast(64)
-    val left = (srcWidth - side) / 2
-    val top = (srcHeight - side) / 2
+/** 扫描框占预览短边的比例，屏幕上的框和分析帧的 ROI 共用它喵 */
+private const val SCAN_BOX_RATIO = 0.62f
+
+/** 太小的裁切解不出码，直接放弃这一帧喵 */
+private const val MIN_ROI_SIDE = 64
+
+/**
+ * 把 YUV_420_888 的 Y 平面按真实行宽摊平，取出「屏幕上扫描框里」的那块正方形。
+ *
+ * ViewPort 会把分析帧裁成预览里看得见的视野，cropRect 就是这块；
+ * 再按框在预览里的百分比换算出 ROI，框里对准的就是真正解码的区域喵。
+ * 直接把 planes[0].buffer 当紧凑数组用会踩 rowStride 的对齐填充，整帧会斜着错位。
+ */
+private fun ImageProxy.scanBoxLuminance(boxFraction: RectF?): LumaFrame? {
+    val plane = planes.firstOrNull() ?: return null
+    val bufferWidth = width
+    val bufferHeight = height
+    if (bufferWidth <= 0 || bufferHeight <= 0) return null
+
+    val crop = cropRect
+    if (crop.width() <= 0 || crop.height() <= 0) return null
+    if (crop.left < 0 || crop.top < 0 ||
+        crop.right > bufferWidth || crop.bottom > bufferHeight
+    ) return null
+
+    // rotationDegrees 不为 0 时，屏幕上的竖幅对应 buffer 里横过来的那块喵
+    val rotation = imageInfo.rotationDegrees
+    val swapped = rotation == 90 || rotation == 270
+    val uprightWidth = if (swapped) crop.height() else crop.width()
+    val uprightHeight = if (swapped) crop.width() else crop.height()
+    if (uprightWidth < MIN_ROI_SIDE || uprightHeight < MIN_ROI_SIDE) return null
+
+    // 先在「竖直画面」里算出框的像素范围
+    val leftU: Int
+    val topU: Int
+    val side: Int
+    if (boxFraction != null) {
+        val l = (boxFraction.left * uprightWidth).toInt()
+        val t = (boxFraction.top * uprightHeight).toInt()
+        val r = (boxFraction.right * uprightWidth).toInt()
+        val b = (boxFraction.bottom * uprightHeight).toInt()
+        val boxWidth = r - l
+        val boxHeight = b - t
+        if (boxWidth <= 0 || boxHeight <= 0) return null
+        // 边长同时压到源帧短边以内，绝不越界
+        side = minOf(boxWidth, boxHeight, uprightWidth, uprightHeight)
+        if (side < MIN_ROI_SIDE) return null
+        leftU = (l + boxWidth / 2 - side / 2).coerceIn(0, uprightWidth - side)
+        topU = (t + boxHeight / 2 - side / 2).coerceIn(0, uprightHeight - side)
+    } else {
+        // 还没量到框的尺寸时，退回画面正中同比例的一块喵
+        side = (minOf(uprightWidth, uprightHeight) * SCAN_BOX_RATIO).toInt()
+            .coerceAtMost(minOf(uprightWidth, uprightHeight))
+        if (side < MIN_ROI_SIDE) return null
+        leftU = (uprightWidth - side) / 2
+        topU = (uprightHeight - side) / 2
+    }
+
+    // 竖直画面的坐标 → buffer 坐标（正方形转了还是正方形，位置要跟着转）
+    val localLeft: Int
+    val localTop: Int
+    when (rotation) {
+        90 -> {
+            localLeft = topU
+            localTop = crop.height() - leftU - side
+        }
+        180 -> {
+            localLeft = crop.width() - leftU - side
+            localTop = crop.height() - topU - side
+        }
+        270 -> {
+            localLeft = crop.width() - topU - side
+            localTop = leftU
+        }
+        else -> {
+            localLeft = leftU
+            localTop = topU
+        }
+    }
+    val left = crop.left + localLeft
+    val top = crop.top + localTop
+    if (left < 0 || top < 0 || left + side > bufferWidth || top + side > bufferHeight) return null
 
     val rowStride = plane.rowStride
     val pixelStride = maxOf(1, plane.pixelStride)
+    if (rowStride <= 0) return null
+
     val buffer = plane.buffer.duplicate()
     buffer.rewind()
+    val limit = buffer.limit()
+    if (limit <= 0) return null
+
+    val lastColumnOffset = (left + side - 1) * pixelStride
+    val lastRowIndex = top + side - 1
+    // 帧不够大就是异常帧，直接不要，别拿黑边凑数喵
+    if (lastRowIndex.toLong() * rowStride + lastColumnOffset >= limit) return null
 
     val out = ByteArray(side * side)
     val rowBuffer = ByteArray(rowStride)
 
     for (y in 0 until side) {
         val rowStart = (top + y) * rowStride
-        if (rowStart >= buffer.limit()) break
+        val available = minOf(rowStride, limit - rowStart)
+        if (available <= lastColumnOffset) return null
         buffer.position(rowStart)
-        val available = minOf(rowStride, buffer.remaining())
-        if (available <= 0) break
         buffer.get(rowBuffer, 0, available)
         var srcX = left * pixelStride
         var dstIndex = y * side
         for (x in 0 until side) {
-            if (srcX in 0 until available) out[dstIndex] = rowBuffer[srcX]
+            out[dstIndex] = rowBuffer[srcX]
             srcX += pixelStride
             dstIndex++
         }
