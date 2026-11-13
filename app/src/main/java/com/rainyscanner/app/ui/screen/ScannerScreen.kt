@@ -54,8 +54,12 @@ import com.rainyscanner.app.data.ScanHistory
 import com.rainyscanner.app.data.ScanRecord
 import com.rainyscanner.app.data.isFidoLink
 import com.rainyscanner.app.util.SystemOpener
+import android.view.MotionEvent
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageProxy
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /**
  * 识别扫码内容的类型；二维码偶尔带的前导空白不影响判定喵~
@@ -288,6 +292,7 @@ fun ScannerScreen(
     }
 }
 
+@Suppress("DEPRECATION")
 @Composable
 fun ZxingCameraPreview(
     modifier: Modifier,
@@ -344,50 +349,66 @@ fun ZxingCameraPreview(
 
                         val imageAnalysis = ImageAnalysis.Builder()
                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            // 不指定分辨率的话，很多机器只给 640x480，码一密就糊喵
+                            .setTargetResolution(android.util.Size(1280, 720))
                             .build()
                             .also { analysis ->
                                 analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                                     try {
-                                        val planes = imageProxy.planes
-                                        if (planes.isNotEmpty()) {
-                                            val buffer: ByteBuffer = planes[0].buffer
-                                            val data = ByteArray(buffer.remaining())
-                                            buffer.get(data)
-
+                                        // 先按真实行宽摊平、再取中心区域，避开 rowStride 把画面撕歪
+                                        val frame = imageProxy.centerLuminance()
+                                        if (frame != null) {
                                             val source = com.google.zxing.PlanarYUVLuminanceSource(
-                                                data,
-                                                imageProxy.width,
-                                                imageProxy.height,
+                                                frame.data,
+                                                frame.width,
+                                                frame.height,
                                                 0, 0,
-                                                imageProxy.width,
-                                                imageProxy.height,
+                                                frame.width,
+                                                frame.height,
                                                 false
                                             )
-                                            val binarizer = HybridBinarizer(source)
-                                            val bitmap = BinaryBitmap(binarizer)
                                             try {
-                                                val result = reader.decode(bitmap)
-                                                result?.text?.let { text ->
-                                                    onBarcodeDetected(text)
-                                                }
+                                                val result = reader.decode(
+                                                    BinaryBitmap(HybridBinarizer(source))
+                                                )
+                                                result?.text?.let { text -> onBarcodeDetected(text) }
                                             } catch (e: NotFoundException) {
-                                                // No barcode found, that's fine
+                                                // 这一帧没读出码，很正常喵
                                             }
                                         }
                                     } catch (e: Exception) {
-                                        // Ignore decoding errors
+                                        // 单帧出错不影响下一帧
                                     } finally {
                                         imageProxy.close()
                                     }
                                 }
                             }
 
-                        cameraProvider.bindToLifecycle(
+                        val camera = cameraProvider.bindToLifecycle(
                             lifecycleOwner,
                             CameraSelector.DEFAULT_BACK_CAMERA,
                             preview,
                             imageAnalysis
                         )
+
+                        // 点哪儿对哪儿焦，凑近扫小码很管用喵
+                        previewView.setOnTouchListener { view, event ->
+                            if (event.actionMasked == MotionEvent.ACTION_UP) {
+                                try {
+                                    val point = previewView.meteringPointFactory
+                                        .createPoint(event.x, event.y)
+                                    val focus = FocusMeteringAction.Builder(
+                                        point,
+                                        FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
+                                    ).setAutoCancelDuration(5, TimeUnit.SECONDS).build()
+                                    camera.cameraControl.startFocusAndMetering(focus)
+                                } catch (e: Exception) {
+                                    // 个别设备不支持对焦，忽略即可
+                                }
+                                view.performClick()
+                            }
+                            true
+                        }
                     } catch (e: Exception) {
                         e.printStackTrace()
                     }
@@ -596,4 +617,46 @@ fun ResultCard(
             }
         }
     }
+}
+
+private data class LumaFrame(val data: ByteArray, val width: Int, val height: Int)
+
+/**
+ * 把 YUV_420_888 的 Y 平面按真实行宽摊平，然后取画面中心的正方形。
+ * 直接把 planes[0].buffer 当紧凑数组用会踩 rowStride 的对齐填充，整帧会斜着错位喵。
+ */
+private fun ImageProxy.centerLuminance(cropRatio: Float = 0.62f): LumaFrame? {
+    val plane = planes.firstOrNull() ?: return null
+    val srcWidth = width
+    val srcHeight = height
+    if (srcWidth <= 0 || srcHeight <= 0) return null
+
+    val side = (minOf(srcWidth, srcHeight) * cropRatio).toInt().coerceAtLeast(64)
+    val left = (srcWidth - side) / 2
+    val top = (srcHeight - side) / 2
+
+    val rowStride = plane.rowStride
+    val pixelStride = maxOf(1, plane.pixelStride)
+    val buffer = plane.buffer.duplicate()
+    buffer.rewind()
+
+    val out = ByteArray(side * side)
+    val rowBuffer = ByteArray(rowStride)
+
+    for (y in 0 until side) {
+        val rowStart = (top + y) * rowStride
+        if (rowStart >= buffer.limit()) break
+        buffer.position(rowStart)
+        val available = minOf(rowStride, buffer.remaining())
+        if (available <= 0) break
+        buffer.get(rowBuffer, 0, available)
+        var srcX = left * pixelStride
+        var dstIndex = y * side
+        for (x in 0 until side) {
+            if (srcX in 0 until available) out[dstIndex] = rowBuffer[srcX]
+            srcX += pixelStride
+            dstIndex++
+        }
+    }
+    return LumaFrame(out, side, side)
 }
