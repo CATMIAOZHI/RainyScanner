@@ -56,20 +56,27 @@ import com.rainyscanner.app.data.ScanRecord
 import com.rainyscanner.app.data.isFidoLink
 import com.rainyscanner.app.util.SystemOpener
 import android.graphics.RectF
+import android.hardware.display.DisplayManager
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.view.MotionEvent
+import android.view.View
+import androidx.camera.core.CameraControl
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
-import androidx.core.view.doOnLayout
 import androidx.lifecycle.LifecycleOwner
 import java.util.concurrent.CancellationException
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executor
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -377,8 +384,28 @@ fun ZxingCameraPreview(
             .build()
     }
 
+    // 预览 View 的销毁标记：晚到的布局/旋转回调看到它就不再绑相机喵
+    val previewDestroyed = remember { AtomicBoolean(false) }
+    // 每次重绑换一代；分析器拿着旧代号就把帧丢掉，别用新框百分比配旧 cropRect 喵
+    val bindingGeneration = remember { AtomicInteger(0) }
+    // 当前活着的预览 View 和它的尺寸/旋转监听器，销毁时要一个个摘掉喵
+    val previewViewRef = remember { AtomicReference<PreviewView?>(null) }
+    val rebindGuardRef = remember { AtomicReference<PreviewRebindGuard?>(null) }
+
     DisposableEffect(Unit) {
         onDispose {
+            // 先立旗子再摘监听：已经在路上的布局/旋转回调进不了绑定喵
+            previewDestroyed.set(true)
+            val guard = rebindGuardRef.getAndSet(null)
+            previewViewRef.getAndSet(null)?.let { view ->
+                guard?.let { view.removeOnLayoutChangeListener(it) }
+            }
+            guard?.let { watcher ->
+                runCatching {
+                    (context.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+                        ?.unregisterDisplayListener(watcher)
+                }
+            }
             // 先释放相机绑定，再关闭线程池喵！
             cameraProviderRef.value?.unbindAll()
             cameraExecutor.shutdownNow()
@@ -391,31 +418,47 @@ fun ZxingCameraPreview(
             PreviewView(ctx).also { previewView ->
                 // 预览撑满预览区，ViewPort 拿到的就是屏幕上真正看得见的视野喵
                 previewView.scaleType = PreviewView.ScaleType.FILL_CENTER
+                previewViewRef.set(previewView)
 
                 val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
                 cameraProviderFuture.addListener({
+                    if (previewDestroyed.get()) return@addListener
                     try {
                         val cameraProvider = cameraProviderFuture.get()
                         cameraProviderRef.value = cameraProvider
 
-                        // viewPort 要等预览量好尺寸才有值；转屏后会重新量、重新绑喵
-                        previewView.doOnLayout {
-                            try {
-                                bindScanUseCases(
-                                    cameraProvider = cameraProvider,
-                                    lifecycleOwner = lifecycleOwner,
-                                    previewView = previewView,
-                                    cameraExecutor = cameraExecutor,
-                                    reader = reader,
-                                    resolutionSelector = resolutionSelector,
-                                    scanBoxRef = scanBoxRef,
-                                    onBarcodeDetected = onBarcodeDetected,
-                                    mainExecutor = mainExecutor
-                                )
-                            } catch (e: Exception) {
-                                Log.e(TAG, "相机绑定失败喵", e)
+                        // 真正的持续监听：转屏、分屏、折叠后尺寸或旋转变了都会重绑
+                        // （原来只在 provider 就绪时 doOnLayout 跑一次，之后尺寸再变就跟不上了）喵
+                        val guard = PreviewRebindGuard(
+                            previewView = previewView,
+                            destroyed = previewDestroyed,
+                            bindAction = {
+                                try {
+                                    bindScanUseCases(
+                                        cameraProvider = cameraProvider,
+                                        lifecycleOwner = lifecycleOwner,
+                                        previewView = previewView,
+                                        cameraExecutor = cameraExecutor,
+                                        reader = reader,
+                                        resolutionSelector = resolutionSelector,
+                                        scanBoxRef = scanBoxRef,
+                                        onBarcodeDetected = onBarcodeDetected,
+                                        mainExecutor = mainExecutor,
+                                        bindingGeneration = bindingGeneration
+                                    )
+                                    true
+                                } catch (e: Exception) {
+                                    Log.e(TAG, "相机绑定失败喵", e)
+                                    false
+                                }
                             }
-                        }
+                        )
+                        rebindGuardRef.set(guard)
+                        previewView.addOnLayoutChangeListener(guard)
+                        (ctx.getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)
+                            ?.registerDisplayListener(guard, Handler(Looper.getMainLooper()))
+                        // 尺寸已经量好就先绑一次；还没量好就等布局回调来喵
+                        guard.bindNow()
                     } catch (e: Exception) {
                         Log.e(TAG, "拿不到相机喵", e)
                     }
@@ -437,10 +480,14 @@ private fun bindScanUseCases(
     resolutionSelector: ResolutionSelector,
     scanBoxRef: AtomicReference<RectF?>,
     onBarcodeDetected: (String) -> Unit,
-    mainExecutor: Executor
+    mainExecutor: Executor,
+    bindingGeneration: AtomicInteger
 ) {
-    // 安全起见先解绑，避免重复绑定冲突喵！
+    // 安全起见先解绑，避免重复绑定冲突喵！旧的分析器也就此停掉，不会再有新帧进来
     cameraProvider.unbindAll()
+
+    // 这一代绑定自己的代号；重绑会把它加一，还带着旧代号的帧一律丢掉喵
+    val generation = bindingGeneration.incrementAndGet()
 
     val preview = Preview.Builder().build().also {
         it.surfaceProvider = previewView.surfaceProvider
@@ -453,6 +500,9 @@ private fun bindScanUseCases(
         .also { analysis ->
             analysis.setAnalyzer(cameraExecutor) { imageProxy ->
                 try {
+                    // 代号对不上说明尺寸/旋转变了已经重绑，这帧属于上一代，丢掉喵
+                    // （别用新框百分比去配旧 cropRect，不然框和 ROI 就错位了）
+                    if (bindingGeneration.get() != generation) return@setAnalyzer
                     // 按屏幕框住的百分比取亮度，框里对准的就是真正解码的那块喵
                     val frame = imageProxy.scanBoxLuminance(scanBoxRef.get())
                     if (frame != null) {
@@ -505,10 +555,19 @@ private fun bindScanUseCases(
                     FocusMeteringAction.FLAG_AF or FocusMeteringAction.FLAG_AE
                 ).setAutoCancelDuration(5, TimeUnit.SECONDS).build()
                 val focusFuture = camera.cameraControl.startFocusAndMetering(focus)
-                // 被下一次对焦顶掉算正常取消，真失败才记一条日志喵
                 focusFuture.addListener({
                     try {
                         focusFuture.get()
+                    } catch (e: ExecutionException) {
+                        // get() 把 OperationCanceledException 包进 ExecutionException，得拆开看喵
+                        val cause = e.cause
+                        if (cause is CameraControl.OperationCanceledException ||
+                            cause is CancellationException
+                        ) {
+                            // 被下一次对焦顶掉，正常取消，静默喵
+                        } else {
+                            Log.w(TAG, "对焦/测光请求失败喵", cause ?: e)
+                        }
                     } catch (e: CancellationException) {
                         // 新的对焦请求接管了，静默喵
                     } catch (e: Exception) {
@@ -522,6 +581,80 @@ private fun bindScanUseCases(
             view.performClick()
         }
         true
+    }
+}
+
+/**
+ * 盯着预览 View 的尺寸和屏幕旋转：只有宽高或旋转真的变了才重绑相机喵。
+ *
+ * 布局回调会重复来好几次，旋转回调也常常先于重新量尺寸到，
+ * 所以统一用「宽 x 高 + 屏幕旋转」这一份签名去重：签名没变就一次都不重绑。
+ * 绑定失败会把签名作废，下一次回调再试，不留「已经绑过」的假状态。
+ */
+private class PreviewRebindGuard(
+    private val previewView: PreviewView,
+    private val destroyed: AtomicBoolean,
+    private val bindAction: () -> Boolean
+) : View.OnLayoutChangeListener, DisplayManager.DisplayListener {
+
+    private var lastSignature: Triple<Int, Int, Int>? = null
+    private var retriesLeft = BIND_RETRY_MAX
+
+    /** 当前的「宽 x 高 + 旋转」；尺寸还没量出来就是 null 喵 */
+    private fun signature(): Triple<Int, Int, Int>? {
+        val width = previewView.width
+        val height = previewView.height
+        if (width <= 0 || height <= 0) return null
+        // display.rotation 就是 Surface.ROTATION_0/90/180/270 那一套值喵
+        val rotation = previewView.display?.rotation ?: 0
+        return Triple(width, height, rotation)
+    }
+
+    /** provider 就绪或尺寸变化后调用；尺寸和旋转都没变就什么都不做喵 */
+    fun bindNow() {
+        if (destroyed.get()) return
+        val signature = signature() ?: return
+        if (signature == lastSignature) return
+        lastSignature = signature
+        if (bindAction()) {
+            retriesLeft = BIND_RETRY_MAX
+            return
+        }
+        // 绑失败多半是预览还没挂到窗口（viewPort 还没值）：
+        // 作废签名，过一会儿补试几次，别让预览一直黑着喵
+        lastSignature = null
+        if (retriesLeft > 0 && !destroyed.get()) {
+            retriesLeft--
+            previewView.postDelayed({ bindNow() }, BIND_RETRY_DELAY_MS)
+        }
+    }
+
+    override fun onLayoutChange(
+        v: View,
+        left: Int,
+        top: Int,
+        right: Int,
+        bottom: Int,
+        oldLeft: Int,
+        oldTop: Int,
+        oldRight: Int,
+        oldBottom: Int
+    ) {
+        // 宽高没变的话签名也不会变，交给 bindNow 去重喵
+        bindNow()
+    }
+
+    override fun onDisplayAdded(displayId: Int) {
+        // 没有外接屏需求，忽略喵
+    }
+
+    override fun onDisplayRemoved(displayId: Int) {
+        // 拔屏不影响预览，忽略喵
+    }
+
+    override fun onDisplayChanged(displayId: Int) {
+        // 旋转变了也算一次真变化；若随后的布局回调带着新宽高来，会再重绑一次取新尺寸喵
+        bindNow()
     }
 }
 
@@ -737,6 +870,12 @@ private const val TAG = "RainyScanner"
 
 /** 扫描框占预览短边的比例，屏幕上的框和分析帧的 ROI 共用它喵 */
 private const val SCAN_BOX_RATIO = 0.62f
+
+/** 绑定失败后最多补试几次（预览还没挂到窗口时 viewPort 会是 null）喵 */
+private const val BIND_RETRY_MAX = 5
+
+/** 每次补试之间等多久喵 */
+private const val BIND_RETRY_DELAY_MS = 200L
 
 /** 太小的裁切解不出码，直接放弃这一帧喵 */
 private const val MIN_ROI_SIDE = 64
