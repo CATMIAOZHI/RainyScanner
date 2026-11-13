@@ -386,7 +386,8 @@ fun ZxingCameraPreview(
 
     // 预览 View 的销毁标记：晚到的布局/旋转回调看到它就不再绑相机喵
     val previewDestroyed = remember { AtomicBoolean(false) }
-    // 每次重绑换一代；分析器拿着旧代号就把帧丢掉，别用新框百分比配旧 cropRect 喵
+    // 每次重绑和销毁都换一代；分析器入口拿着旧代号就把帧丢掉，
+    // 结果提交时还要在主线程再核一次代号（见 bindScanUseCases 的闸门）喵
     val bindingGeneration = remember { AtomicInteger(0) }
     // 当前活着的预览 View 和它的尺寸/旋转监听器，销毁时要一个个摘掉喵
     val previewViewRef = remember { AtomicReference<PreviewView?>(null) }
@@ -394,9 +395,14 @@ fun ZxingCameraPreview(
 
     DisposableEffect(Unit) {
         onDispose {
-            // 先立旗子再摘监听：已经在路上的布局/旋转回调进不了绑定喵
+            // 先让这一代立刻作废：已经过了入口检查、还在解码的那帧，
+            // 之后投递回主线程提交时会被闸门拦下，写不进旧页面喵
+            bindingGeneration.incrementAndGet()
+            // 再立旗子再摘监听：已经在路上的布局/旋转回调进不了绑定喵
             previewDestroyed.set(true)
             val guard = rebindGuardRef.getAndSet(null)
+            // 排队的补试一起撤掉，别在销毁后再去绑相机喵
+            guard?.cancel()
             previewViewRef.getAndSet(null)?.let { view ->
                 guard?.let { view.removeOnLayoutChangeListener(it) }
             }
@@ -442,6 +448,7 @@ fun ZxingCameraPreview(
                                         reader = reader,
                                         resolutionSelector = resolutionSelector,
                                         scanBoxRef = scanBoxRef,
+                                        previewDestroyed = previewDestroyed,
                                         onBarcodeDetected = onBarcodeDetected,
                                         mainExecutor = mainExecutor,
                                         bindingGeneration = bindingGeneration
@@ -479,15 +486,37 @@ private fun bindScanUseCases(
     reader: MultiFormatReader,
     resolutionSelector: ResolutionSelector,
     scanBoxRef: AtomicReference<RectF?>,
+    previewDestroyed: AtomicBoolean,
     onBarcodeDetected: (String) -> Unit,
     mainExecutor: Executor,
     bindingGeneration: AtomicInteger
 ) {
-    // 安全起见先解绑，避免重复绑定冲突喵！旧的分析器也就此停掉，不会再有新帧进来
+    // 重绑一开始就让上一代作废：哪怕某帧刚过了入口检查、还在解码，
+    // 它提交结果时也会被主线程闸门拦下喵
+    val generation = bindingGeneration.incrementAndGet()
+    // 再解绑，旧的分析器不再有新帧进来（ZXing 不响应中断，所以不能靠 shutdown 收拾在跑的帧）
     cameraProvider.unbindAll()
 
-    // 这一代绑定自己的代号；重绑会把它加一，还带着旧代号的帧一律丢掉喵
-    val generation = bindingGeneration.incrementAndGet()
+    // 这一代自己的框百分比：绑定这一刻取一次快照，分析器只认这一份，
+    // 不再每帧去读可能被新布局改掉的全局框，免得旧 cropRect 配上新框喵
+    // （只拍了快照，没记布局代号；快照靠「尺寸/旋转变了就重绑」跟着更新，
+    //  代码里没有对框和布局做配对校验）
+    val boundBoxFraction = scanBoxRef.get()
+
+    // 识别结果一律投递回主线程提交：在提交这同一个主线程任务里，重新校验
+    // 「没销毁」和「当前代号还是拿到这帧的那一代」，两个都过才交给页面写状态和历史，
+    // 任一不过就丢掉。后台只查一次是不够的——查完到提交之间照样可能被销毁喵
+    val submitResult: (String) -> Unit = { text ->
+        mainExecutor.execute {
+            if (previewDestroyed.get() || bindingGeneration.get() != generation) {
+                return@execute
+            }
+            // 页面回调现在跑在主线程，分析器那层 catch 罩不到它了；
+            // 这里兜住，别让一次写状态/写历史出错把 App 崩掉（以前也是吞掉的）喵
+            runCatching { onBarcodeDetected(text) }
+                .onFailure { Log.w(TAG, "提交扫码结果失败喵", it) }
+        }
+    }
 
     val preview = Preview.Builder().build().also {
         it.surfaceProvider = previewView.surfaceProvider
@@ -504,7 +533,8 @@ private fun bindScanUseCases(
                     // （别用新框百分比去配旧 cropRect，不然框和 ROI 就错位了）
                     if (bindingGeneration.get() != generation) return@setAnalyzer
                     // 按屏幕框住的百分比取亮度，框里对准的就是真正解码的那块喵
-                    val frame = imageProxy.scanBoxLuminance(scanBoxRef.get())
+                    // 用的是这一代绑定时拍下的框快照，不是随时会变的全局框
+                    val frame = imageProxy.scanBoxLuminance(boundBoxFraction)
                     if (frame != null) {
                         val source = com.google.zxing.PlanarYUVLuminanceSource(
                             frame.data,
@@ -519,7 +549,7 @@ private fun bindScanUseCases(
                             val result = reader.decode(
                                 BinaryBitmap(HybridBinarizer(source))
                             )
-                            result?.text?.let { text -> onBarcodeDetected(text) }
+                            result?.text?.let { text -> submitResult(text) }
                         } catch (e: NotFoundException) {
                             // 这一帧没读出码，很正常喵
                         }
@@ -589,7 +619,8 @@ private fun bindScanUseCases(
  *
  * 布局回调会重复来好几次，旋转回调也常常先于重新量尺寸到，
  * 所以统一用「宽 x 高 + 屏幕旋转」这一份签名去重：签名没变就一次都不重绑。
- * 绑定失败会把签名作废，下一次回调再试，不留「已经绑过」的假状态。
+ * 绑定失败不会记成「已绑」，下一次回调或排好的补试再试；
+ * 同一时刻最多留一个待执行的补试，换新签名时重置失败预算。
  */
 private class PreviewRebindGuard(
     private val previewView: PreviewView,
@@ -597,8 +628,14 @@ private class PreviewRebindGuard(
     private val bindAction: () -> Boolean
 ) : View.OnLayoutChangeListener, DisplayManager.DisplayListener {
 
-    private var lastSignature: Triple<Int, Int, Int>? = null
+    /** 最近一次绑成功的签名；同一个签名不再重复绑喵 */
+    private var boundSignature: Triple<Int, Int, Int>? = null
+    /** 正在补试的签名，用来判断失败预算该不该重置喵 */
+    private var retrySignature: Triple<Int, Int, Int>? = null
     private var retriesLeft = BIND_RETRY_MAX
+
+    /** 补试任务本身，只留一份：排新的之前先把旧的撤掉喵 */
+    private val retryRunnable = Runnable { bindNow() }
 
     /** 当前的「宽 x 高 + 旋转」；尺寸还没量出来就是 null 喵 */
     private fun signature(): Triple<Int, Int, Int>? {
@@ -614,19 +651,43 @@ private class PreviewRebindGuard(
     fun bindNow() {
         if (destroyed.get()) return
         val signature = signature() ?: return
-        if (signature == lastSignature) return
-        lastSignature = signature
-        if (bindAction()) {
+        if (signature == boundSignature) return
+        // 换了一份新签名（首次 / 转屏 / 改尺寸）就把失败预算重置，
+        // 别让上一份签名耗掉的次数拖累新布局喵
+        if (signature != retrySignature) {
+            retrySignature = signature
             retriesLeft = BIND_RETRY_MAX
+        }
+        // 动手之前先把「已绑成功」作废：bindAction 一进去就会 unbindAll，
+        // 这次万一绑失败（或中途抛错），相机其实已经解绑了，
+        // 不能再记着旧签名说「已经绑过」，不然从 B 退回 A 就再也绑不上了喵
+        boundSignature = null
+        if (bindAction()) {
+            boundSignature = signature
+            retrySignature = null
+            retriesLeft = BIND_RETRY_MAX
+            // 成功就把之前排队的补试撤掉，省得它白跑一趟喵
+            removePendingRetry()
             return
         }
         // 绑失败多半是预览还没挂到窗口（viewPort 还没值）：
-        // 作废签名，过一会儿补试几次，别让预览一直黑着喵
-        lastSignature = null
+        // 过一会儿补试几次，别让预览一直黑着喵
+        // （预算只管这几次延迟补试；布局/旋转回调每来一次仍会直接试一次）
         if (retriesLeft > 0 && !destroyed.get()) {
             retriesLeft--
-            previewView.postDelayed({ bindNow() }, BIND_RETRY_DELAY_MS)
+            // 先撤掉可能已经在排队的那一份，保证同时只有一个待执行补试喵
+            removePendingRetry()
+            previewView.postDelayed(retryRunnable, BIND_RETRY_DELAY_MS)
         }
+    }
+
+    /** 销毁时把排队的补试撤掉，别再碰已经没了的预览喵 */
+    fun cancel() {
+        removePendingRetry()
+    }
+
+    private fun removePendingRetry() {
+        previewView.removeCallbacks(retryRunnable)
     }
 
     override fun onLayoutChange(
