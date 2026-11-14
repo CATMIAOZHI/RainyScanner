@@ -104,22 +104,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           name: "🌧️ RainyScanner ${{ github.ref_name }}"
-          body: |
-            ## 🌧️ RainyScanner - 雨晴扫描
-
-            基于 Jetpack Compose 的 Android 条码/二维码扫描应用。
-
-            ### ✨ 特性
-            - Jetpack Compose + Material Design 3
-            - CameraX + ZXing 扫描引擎
-            - 扫描历史记录
-            - 樱粉主题配色
-
-            ### 📱 安装
-            下载 APK 文件直接安装。
-
-            ---
-            **版本**: `${{ github.ref_name }}`
+          generate_release_notes: true
           files: RainyScanner-${{ github.ref_name }}.apk
           draft: false
           prerelease: false
